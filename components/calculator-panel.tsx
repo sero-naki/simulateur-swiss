@@ -117,22 +117,53 @@ export function CalculatorPanel({ location, onLocationChange, solarData, onCalcu
       if (roofData && roofData.radiation > 0) {
         // Use normalized API data (radiation is kWh/m²/year)
         annualRadiation = roofData.radiation
-        // Defensive: if API returned a very large roof area from point-identify and the user
-        // did not draw a polygon, cap to a conservative value and ask the user to confirm by drawing.
-        let apiRoofArea = roofData.area || 0
-        if (dataSource === 'point-identify' && (!location || !(location as any).roofPolygon) && apiRoofArea > 400) {
-          console.warn('[v0] Large roof area detected via point-identify, capping to 400 m² until user confirms with polygon.')
+
+        // Heuristic for roof area when using point-identify (no user polygon):
+        // - Prefer explicit reported collector area (`flaeche_kollektoren`) when present.
+        // - Otherwise use the API point-identify area but conservatively downscale very large values
+        //   (likely the API may return building footprint rather than installable roof area).
+        const apiRoofArea = roofData.area || 0
+        const rawAttrs = roofData.raw as any
+        const attrArea = (() => {
           try {
-            // Inform the user in a simple way for now
-            alert(`Surface détectée très grande (${Math.round(apiRoofArea)} m²). Je limite temporairement l'estimation à 400 m². Pour une estimation précise, dessinez le toit sur la carte.`)
+            if (!rawAttrs) return null
+            if (Array.isArray(rawAttrs) && rawAttrs.length > 0) {
+              const r0 = rawAttrs[0]
+              return r0?.flaeche_kollektoren ? Number(r0.flaeche_kollektoren) : (r0?.flaeche ? Number(r0.flaeche) : null)
+            }
+            return rawAttrs?.flaeche_kollektoren ? Number(rawAttrs.flaeche_kollektoren) : (rawAttrs?.flaeche ? Number(rawAttrs.flaeche) : null)
           } catch (err) {
-            // ignore if alert not available
+            return null
           }
-          apiRoofArea = 400
+        })()
+
+        let chosenArea = apiRoofArea
+        if (dataSource === 'point-identify' && (!location || !(location as any).roofPolygon)) {
+          if (attrArea && attrArea > 0 && attrArea < apiRoofArea * 1.5) {
+            // prefer reported collector area when it's reasonable compared to api area
+            chosenArea = Math.round(attrArea)
+          } else if (apiRoofArea > 800) {
+            // very large reported area -> downscale conservatively to avoid exaggerated yields
+            chosenArea = Math.round(apiRoofArea * 0.4)
+          } else {
+            chosenArea = Math.round(apiRoofArea)
+          }
+        } else {
+          // polygon-sampled or user-drawn: trust the area reported
+          chosenArea = Math.round(apiRoofArea)
         }
 
-        roofArea = apiRoofArea
-        installationPower = roofData.power || roofArea * 0.17 // fallback to 0.17 kW per m²
+        roofArea = chosenArea
+
+        // Installation power: prefer API power when plausible, otherwise use 0.17 kW/m²
+        const apiPower = roofData.power || 0
+        const plausibleMaxPower = roofArea * 0.5 // 500 W/m² upper realistic cap
+        if (apiPower > 0 && apiPower <= plausibleMaxPower) {
+          installationPower = apiPower
+        } else {
+          installationPower = Math.round(roofArea * 0.17 * 10) / 10
+        }
+
         console.log("[v0] Using REAL API data (normalized):", { annualRadiation, roofArea, installationPower })
       } else {
         // Fallback to reasonable Swiss averages for this specific location
@@ -352,8 +383,9 @@ export function CalculatorPanel({ location, onLocationChange, solarData, onCalcu
                 Effacer le cache d'échantillonnage
               </Button>
             </div>
-            {/* Debug panel: raw attributes and source (helpful during diagnosis) */}
-            {debugRaw ? (
+            {/* Debug panel: raw attributes and source (helpful during diagnosis)
+                Hidden by default in production. Enable by setting NEXT_PUBLIC_DEBUG_SIMULATION=1 */}
+            {debugRaw && process.env.NEXT_PUBLIC_DEBUG_SIMULATION === '1' ? (
               <div className="mt-3 text-xs text-muted-foreground bg-slate-50 p-2 rounded">
                 <div className="font-medium">Source des données: {dataSource}</div>
                 <pre className="whitespace-pre-wrap text-[11px] mt-1">{JSON.stringify(debugRaw, null, 2)}</pre>

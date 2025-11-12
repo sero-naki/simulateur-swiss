@@ -15,6 +15,19 @@ export interface SolarRoofData {
   raw: object // raw attributes
 }
 
+// Controlled debug logger: enabled when DEBUG_SIMULATION=1 in server env or
+// when window.__DEBUG_SIMULATION === true in the browser.
+const DEBUG_SIMULATION_FLAG =
+  (typeof process !== 'undefined' && typeof process.env !== 'undefined' && process.env.DEBUG_SIMULATION === '1') ||
+  (typeof window !== 'undefined' && (window as any).__DEBUG_SIMULATION === true)
+
+function debugLog(...args: any[]) {
+  if (DEBUG_SIMULATION_FLAG) {
+    // eslint-disable-next-line no-console
+    console.log(...args)
+  }
+}
+
 // --- polygon sampling cache + persistence ---
 const _polygonSampleCache = new Map<string, number>()
 
@@ -62,21 +75,21 @@ if (typeof window !== 'undefined') {
  * Convert WGS84 coordinates to Swiss LV95 system
  */
 export async function convertWGS84toLV95(lat: number, lng: number): Promise<SwissCoordinates> {
-  console.log("[v0] Converting coordinates:", { lat, lng })
+  debugLog("[v0] Converting coordinates:", { lat, lng })
 
   // Swiss reframe API expects: /reframe/{source_system}to{target_system}
   // Parameters should be in the format appropriate for the source system
   // For WGS84: latitude and longitude
   const url = `https://api3.geo.admin.ch/reframe/wgs84tolv95?easting=${lng}&northing=${lat}&format=json`
 
-  console.log("[v0] Reframe API URL:", url)
+  debugLog("[v0] Reframe API URL:", url)
 
   const response = await fetch(url)
 
   if (!response.ok) {
     // Try alternative API endpoint structure
     const altUrl = `https://geodesy.geo.admin.ch/reframe/wgs84tolv95?easting=${lng}&northing=${lat}&format=json`
-    console.log("[v0] Trying alternative URL:", altUrl)
+  debugLog("[v0] Trying alternative URL:", altUrl)
     const altResponse = await fetch(altUrl)
 
     if (!altResponse.ok) {
@@ -91,7 +104,7 @@ export async function convertWGS84toLV95(lat: number, lng: number): Promise<Swis
   }
 
   const data = await response.json()
-  console.log("[v0] Converted coordinates:", data)
+  debugLog("[v0] Converted coordinates:", data)
 
   return {
     easting: data.easting,
@@ -103,7 +116,7 @@ export async function convertWGS84toLV95(lat: number, lng: number): Promise<Swis
  * Get solar radiation data for a roof at given coordinates
  */
 export async function getSolarData(easting: number, northing: number): Promise<SolarRoofData | null> {
-  console.log("[v0] Fetching solar data for LV95:", { easting, northing })
+  debugLog("[v0] Fetching solar data for LV95:", { easting, northing })
 
   // Use identify service to query solar layer
   const geometryType = "esriGeometryPoint"
@@ -126,20 +139,20 @@ export async function getSolarData(easting: number, northing: number): Promise<S
     `sr=${sr}&` +
     `lang=fr`
 
-  console.log("[v0] Solar data API URL:", url)
+  debugLog("[v0] Solar data API URL:", url)
 
   const response = await fetch(url)
 
   if (!response.ok) {
-    console.log("[v0] Solar API error:", response.status)
+  debugLog("[v0] Solar API error:", response.status)
     return null
   }
 
   const data = await response.json()
-  console.log("[v0] Solar API response:", data)
+  debugLog("[v0] Solar API response:", data)
 
   if (!data.results || data.results.length === 0) {
-    console.log("[v0] No solar data found at this location")
+    debugLog("[v0] No solar data found at this location")
     return null
   }
   // If Identify returns multiple candidates, deduplicate by building id / object id
@@ -224,9 +237,9 @@ export async function getSolarData(easting: number, northing: number): Promise<S
   const CHOOSE_NEARBY_METERS = 20
   const chosenObj = nearest && (nearest as any).dist <= CHOOSE_NEARBY_METERS ? nearest : uniq[0]
 
-  console.log('[v0] Solar identify candidates (top 5 with dist m):', uniq.slice(0, 5).map((u) => ({ flaeche: u.f, stromertrag: u.s, dist: Math.round((u as any).dist || 0) })))
+  debugLog('[v0] Solar identify candidates (top 5 with dist m):', uniq.slice(0, 5).map((u) => ({ flaeche: u.f, stromertrag: u.s, dist: Math.round((u as any).dist || 0) })))
   const attrs = chosenObj ? chosenObj.attrs : data.results[0].attributes
-  console.log("[v0] Solar attributes (chosen):", attrs)
+  debugLog("[v0] Solar attributes (chosen):", attrs)
 
   // Prefer reliable numeric fields
   const flaeche = Number(attrs.flaeche) || 0
@@ -247,16 +260,16 @@ export async function getSolarData(easting: number, northing: number): Promise<S
 
   // 1) If stromertrag and roof area exist, derive irradiation per m²
   if (stromertrag && flaeche > 0) {
-    annualKwhPerM2 = stromertrag / (flaeche * COMBINED_FACTOR)
-    console.log('[v0] Derived annualKwhPerM2 from stromertrag:', annualKwhPerM2)
+  annualKwhPerM2 = stromertrag / (flaeche * COMBINED_FACTOR)
+  debugLog('[v0] Derived annualKwhPerM2 from stromertrag:', annualKwhPerM2)
   }
 
   // 2) If no stromertrag-based value, try monthly radiation -> annual
   if (!annualKwhPerM2 && mstrahlung) {
     const cand = mstrahlung * 12
     if (cand > 200 && cand < 20000) {
-      annualKwhPerM2 = cand
-      console.log('[v0] Using mstrahlung*12 as annualKwhPerM2:', annualKwhPerM2)
+  annualKwhPerM2 = cand
+  debugLog('[v0] Using mstrahlung*12 as annualKwhPerM2:', annualKwhPerM2)
     }
   }
 
@@ -266,8 +279,8 @@ export async function getSolarData(easting: number, northing: number): Promise<S
     const candidates = [g, g / 1000, g / 3.6]
     for (const c of candidates) {
       if (c > 200 && c < 20000) {
-        annualKwhPerM2 = c
-        console.log('[v0] Interpreted gstrahlung candidate as annualKwhPerM2:', c)
+  annualKwhPerM2 = c
+  debugLog('[v0] Interpreted gstrahlung candidate as annualKwhPerM2:', c)
         break
       }
     }
@@ -276,8 +289,8 @@ export async function getSolarData(easting: number, northing: number): Promise<S
   // 4) Final fallback: use raw gstrahlung or mstrahlung*12 if present, otherwise 0
   if (!annualKwhPerM2) {
     const fallback = (gstrahlung && gstrahlung) || (mstrahlung && mstrahlung * 12) || 0
-    annualKwhPerM2 = fallback || 0
-    console.log('[v0] Fallback annualKwhPerM2:', annualKwhPerM2)
+  annualKwhPerM2 = fallback || 0
+  debugLog('[v0] Fallback annualKwhPerM2:', annualKwhPerM2)
   }
 
   return {
@@ -322,7 +335,7 @@ export async function getSolarDataForPolygon(polygonWgs84: Array<{ lat: number; 
     `sr=${sr}&` +
     `lang=fr`
 
-  console.log("[v0] Polygon solar data API URL:", url)
+  debugLog("[v0] Polygon solar data API URL:", url)
 
   const response = await fetch(url)
   if (!response.ok) return null
